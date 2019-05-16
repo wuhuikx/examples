@@ -18,6 +18,7 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+from torch.utils import mkldnn as mkldnn_utils
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -74,24 +75,30 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--mkldnn', action='store_true', default=False,
+                    help='use mkldnn weight cache')
+parser.add_argument('--no-cuda', action='store_true', default=False,
+                   help='disable CUDA')
 
 best_acc1 = 0
 
 
 def main():
     args = parser.parse_args()
+    args.cuda = not args.no_cuda and torch.cuda.is_available()
 
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
-        cudnn.deterministic = True
+        if args.cuda:
+            cudnn.deterministic = True
         warnings.warn('You have chosen to seed training. '
                       'This will turn on the CUDNN deterministic setting, '
                       'which can slow down your training considerably! '
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
-    if args.gpu is not None:
+    if args.gpu is not None and args.cuda:
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
 
@@ -117,7 +124,7 @@ def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
 
-    if args.gpu is not None:
+    if args.gpu is not None and args.cuda:
         print("Use GPU: {} for training".format(args.gpu))
 
     if args.distributed:
@@ -141,7 +148,7 @@ def main_worker(gpu, ngpus_per_node, args):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
+        if args.gpu is not None and args.cuda:
             torch.cuda.set_device(args.gpu)
             model.cuda(args.gpu)
             # When using a single GPU per process and per
@@ -151,23 +158,31 @@ def main_worker(gpu, ngpus_per_node, args):
             args.workers = int(args.workers / ngpus_per_node)
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         else:
-            model.cuda()
+            if args.cuda:
+                model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
             model = torch.nn.parallel.DistributedDataParallel(model)
-    elif args.gpu is not None:
+    elif args.gpu is not None and args.cuda:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
     else:
         # DataParallel will divide and allocate batch_size to all available GPUs
         if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
             model.features = torch.nn.DataParallel(model.features)
-            model.cuda()
+            if args.cuda:
+                model.cuda()
         else:
-            model = torch.nn.DataParallel(model).cuda()
+            model = torch.nn.DataParallel(model)
+            if args.cuda:
+                model.cuda()
+            #model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    #criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    criterion = nn.CrossEntropyLoss()
+    if args.cuda:
+        criterion.cuda(args.gpu)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -189,6 +204,11 @@ def main_worker(gpu, ngpus_per_node, args):
                   .format(args.resume, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
+
+    # support mkldnn
+    if (args.mkldnn and not args.cuda):
+        model = mkldnn_utils.to_mkldnn(model)
+        print("using mkldnn model\n")
 
     cudnn.benchmark = True
 
@@ -244,7 +264,7 @@ def main_worker(gpu, ngpus_per_node, args):
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
-
+        '''
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
             save_checkpoint({
@@ -254,7 +274,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
             }, is_best)
-
+        '''
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -273,16 +293,26 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        if args.gpu is not None:
+        if (args.gpu is not None and args.cuda):
             input = input.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
+        if (args.mkldnn and not args.cuda):
+            input = input.to_mkldnn()
+
+        if args.cuda:
+            target = target.cuda(args.gpu, non_blocking=True)
 
         # compute output
         output = model(input)
+        if (args.mkldnn and not args.cuda):
+            output = output.to_dense()
+
         loss = criterion(output, target)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        if (args.mkldnn and args.gpu is None):
+            input = input.to_dense()
+
         losses.update(loss.item(), input.size(0))
         top1.update(acc1[0], input.size(0))
         top5.update(acc5[0], input.size(0))
@@ -314,16 +344,26 @@ def validate(val_loader, model, criterion, args):
     with torch.no_grad():
         end = time.time()
         for i, (input, target) in enumerate(val_loader):
-            if args.gpu is not None:
+            if (args.gpu is not None and args.cuda):
                 input = input.cuda(args.gpu, non_blocking=True)
-            target = target.cuda(args.gpu, non_blocking=True)
 
+            if args.cuda:
+                target = target.cuda(args.gpu, non_blocking=True)
+
+            if (args.mkldnn and not args.cuda):
+                input = input.to_mkldnn()
             # compute output
             output = model(input)
+            if (args.mkldnn and not args.cuda):
+                output = output.to_dense()
+
             loss = criterion(output, target)
 
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            if (args.mkldnn and not args.cuda):
+                input = input.to_dense()
+
             losses.update(loss.item(), input.size(0))
             top1.update(acc1[0], input.size(0))
             top5.update(acc5[0], input.size(0))
