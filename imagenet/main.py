@@ -189,6 +189,8 @@ def main_worker(gpu, ngpus_per_node, args):
                                 weight_decay=args.weight_decay)
 
     # optionally resume from a checkpoint
+
+    #mkldnn model can't be loaded 
     if args.resume:
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
@@ -208,6 +210,9 @@ def main_worker(gpu, ngpus_per_node, args):
     # support mkldnn
     if (args.mkldnn and not args.cuda):
         model = mkldnn_utils.to_mkldnn(model)
+        optimizer = torch.optim.SGD(model.parameters(), args.lr,
+                                    momentum=args.momentum,
+                                    weight_decay=args.weight_decay)
         print("using mkldnn model\n")
 
     cudnn.benchmark = True
@@ -264,9 +269,16 @@ def main_worker(gpu, ngpus_per_node, args):
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
-        '''
+
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
+            # save the model as cpu model
+            if (args.mkldnn and not args.cuda):
+                model = mkldnn_utils.to_dense(model)
+                optimizer = torch.optim.SGD(model.parameters(), args.lr,
+                                            momentum=args.momentum,
+                                            weight_decay=args.weight_decay)
+
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
@@ -274,7 +286,12 @@ def main_worker(gpu, ngpus_per_node, args):
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
             }, is_best)
-        '''
+            if (args.mkldnn and not args.cuda):
+                model = mkldnn_utils.to_mkldnn(model)
+                optimizer = torch.optim.SGD(model.parameters(), args.lr,
+                                            momentum=args.momentum,
+                                            weight_decay=args.weight_decay)
+
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
