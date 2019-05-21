@@ -20,6 +20,8 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 from torch.utils import mkldnn as mkldnn_utils
 
+import optimizer_util
+
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -210,9 +212,8 @@ def main_worker(gpu, ngpus_per_node, args):
     # support mkldnn
     if (args.mkldnn and not args.cuda):
         model = mkldnn_utils.to_mkldnn(model)
-        optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                    momentum=args.momentum,
-                                    weight_decay=args.weight_decay)
+        optimizer_util.to_mkldnn(optimizer)
+
         print("using mkldnn model\n")
 
     cudnn.benchmark = True
@@ -275,9 +276,7 @@ def main_worker(gpu, ngpus_per_node, args):
             # save the model as cpu model
             if (args.mkldnn and not args.cuda):
                 model = mkldnn_utils.to_dense(model)
-                optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                            momentum=args.momentum,
-                                            weight_decay=args.weight_decay)
+                optimizer_util.to_dense(optimizer)
 
             save_checkpoint({
                 'epoch': epoch + 1,
@@ -288,9 +287,7 @@ def main_worker(gpu, ngpus_per_node, args):
             }, is_best)
             if (args.mkldnn and not args.cuda):
                 model = mkldnn_utils.to_mkldnn(model)
-                optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                            momentum=args.momentum,
-                                            weight_decay=args.weight_decay)
+                optimizer_util.to_mkldnn(optimizer)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
