@@ -21,6 +21,8 @@ import torchvision.models as models
 from torch.utils import mkldnn as mkldnn_utils
 
 import optimizer_util
+#import state_util
+import copy
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -275,18 +277,22 @@ def main_worker(gpu, ngpus_per_node, args):
                 and args.rank % ngpus_per_node == 0):
             # save the model as cpu model
             if (args.mkldnn and not args.cuda):
-                model = mkldnn_utils.to_dense(model)
+                cpu_model = mkldnn_utils.to_dense(copy.deepcopy(model))
                 optimizer_util.to_dense(optimizer)
+                cpu_state_dict = cpu_model.state_dict()
+            else:
+                cpu_state_dict = model.state_dict()
 
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
-                'state_dict': model.state_dict(),
+                #'state_dict': model.state_dict(),
+                'state_dict': cpu_state_dict,
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
             }, is_best)
+
             if (args.mkldnn and not args.cuda):
-                model = mkldnn_utils.to_mkldnn(model)
                 optimizer_util.to_mkldnn(optimizer)
 
 
