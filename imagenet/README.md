@@ -98,3 +98,20 @@ optional arguments:
                         fastest way to use PyTorch for either single node or
                         multi node data parallel training
 ```
+## Tips
+
+If we want to get a better performance when using MKLDNN backend, we can use a better alloctor: TCmalloc.
+### How to using TCmalloc
+1. Install TCmalloc:
+```
+git clone https://github.com/gperftools/gperftools.git
+./autogen.sh
+./configure
+make
+make check(可选)
+make install
+make clean 
+```
+2. Using TCmalloc
+`export LD_PRELOAD=<your install tcmalloc path>/lib/libtcmalloc.so`
+
