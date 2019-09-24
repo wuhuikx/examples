@@ -23,7 +23,7 @@ The default learning rate schedule starts at 0.1 and decays by a factor of 10 ev
 python main.py -a alexnet --lr 0.01 [imagenet-folder with train and val folders]
 ```
 
-## Multi-processing Distributed Data Parallel Training
+## Multi-processing Distributed Data Parallel Training ON GPU
 
 You should always use the NCCL backend for multi-processing distributed training since it currently provides the best distributed training performance.
 
@@ -45,6 +45,24 @@ Node 1:
 python main.py -a resnet50 --dist-url 'tcp://IP_OF_NODE0:FREEPORT' --dist-backend 'nccl' --multiprocessing-distributed --world-size 2 --rank 1 [imagenet-folder with train and val folders]
 ```
 
+## Multi-processing Distributed Data Parallel Training ON CPU: 
+
+### One node 2 instance:
+```bash
+python main.py -a resnet18  --dist-url 'tcp://192.168.20.11:22384' --dist-backend 'gloo' --ppn 2 --world-size 1 --rank 0 -b 128 --mkldnn --multiprocessing-distributed /lustre/dataset/imagenet/img/
+```
+### Two nodes 2 instance on each:
+
+Node 1:
+```bash
+python main.py -a resnet18 --dist-url 'tcp://192.168.20.11:22384' --dist-backend 'gloo' --ppn 2 --world-size 2 --rank 0 -b 128 --mkldnn --multiprocessing-distributed /lustre/dataset/imagenet/img/
+```
+
+Node 2:
+```bash
+python main.py -a resnet18 --dist-url 'tcp://192.168.20.11:22384' --dist-backend 'gloo' --ppn 2 --world-size 2 --rank 1 -b 128 --mkldnn --multiprocessing-distributed /lustre/dataset/imagenet/img/
+```
+
 ## Usage
 
 ```
@@ -54,6 +72,7 @@ usage: main.py [-h] [--arch ARCH] [-j N] [--epochs N] [--start-epoch N] [-b N]
                [--rank RANK] [--dist-url DIST_URL]
                [--dist-backend DIST_BACKEND] [--seed SEED] [--gpu GPU]
                [--multiprocessing-distributed]
+               [--mkldnn] [--no-cuda]
                DIR
 
 PyTorch ImageNet Training
@@ -97,6 +116,7 @@ optional arguments:
                         processes per node, which has N GPUs. This is the
                         fastest way to use PyTorch for either single node or
                         multi node data parallel training
+  --mkldnn              Using mkldnn backend to training
 ```
 ## Tips
 
