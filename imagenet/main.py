@@ -61,6 +61,8 @@ parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
+parser.add_argument('--ppn', default=1, type=int,
+                    help='number of processes on each node of distributed training')
 parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
@@ -84,6 +86,7 @@ best_acc1 = 0
 
 def main():
     args = parser.parse_args()
+    print("args.world_size", args.world_size)
     args.cuda = not args.no_cuda and torch.cuda.is_available()
 
     if args.seed is not None:
@@ -104,9 +107,13 @@ def main():
     if args.dist_url == "env://" and args.world_size == -1:
         args.world_size = int(os.environ["WORLD_SIZE"])
 
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
+    args.distributed = args.world_size > 1 or args.ppn > 1 or args.multiprocessing_distributed
 
-    ngpus_per_node = torch.cuda.device_count() if args.cuda else 0
+    if args.gpu is not None and args.cuda:
+        ngpus_per_node = torch.cuda.device_count()
+    else:
+        ngpus_per_node = args.ppn
+
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
@@ -126,13 +133,18 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.gpu is not None and args.cuda:
         print("Use GPU: {} for training".format(args.gpu))
 
+    print("Use Instance: {} for training".format(gpu))
+    print("Use num threads: {} for training".format(torch.get_num_threads()))
     if args.distributed:
         if args.dist_url == "env://" and args.rank == -1:
+            print(os.environ["RANK"])
             args.rank = int(os.environ["RANK"])
         if args.multiprocessing_distributed:
             # For multiprocessing distributed training, rank needs to be the
             # global rank among all the processes
             args.rank = args.rank * ngpus_per_node + gpu
+        print("args.dist_backend {}".format(args.dist_backend))
+        print("args.dist_url {}".format(args.dist_url))
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
     # create model
@@ -147,7 +159,7 @@ def main_worker(gpu, ngpus_per_node, args):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
+        if args.gpu is not None and args.cuda:
             torch.cuda.set_device(args.gpu)
             model.cuda(args.gpu)
             # When using a single GPU per process and per
@@ -157,9 +169,14 @@ def main_worker(gpu, ngpus_per_node, args):
             args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         else:
-            model.cuda()
+            if args.cuda:
+                model.cuda()
+                print("create DistributedDataParallel in GPU")
+            else:
+                print("create DistributedDataParallel in CPU")
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
+
             model = torch.nn.parallel.DistributedDataParallel(model)
     elif args.gpu is not None and args.cuda:
         torch.cuda.set_device(args.gpu)
@@ -176,7 +193,10 @@ def main_worker(gpu, ngpus_per_node, args):
                 model.cuda()
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss()
+    if args.cuda:
+        criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    else:
+        criterion = nn.CrossEntropyLoss()
     if args.cuda:
         criterion.cuda(args.gpu)
 
@@ -258,6 +278,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
+        print("run epoch '{}'".format(epoch))
         train(train_loader, model, criterion, optimizer, epoch, args)
 
         # evaluate on validation set
@@ -267,8 +288,7 @@ def main_worker(gpu, ngpus_per_node, args):
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
+        if args.rank == 0:
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
