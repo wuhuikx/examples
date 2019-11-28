@@ -143,7 +143,7 @@ https://gperftools.github.io/gperftools/tcmalloc.html
 
 ### How to using Jemalloc
 1. Install Jemalloc:
-https://github.com/jemalloc/jemalloc/blob/dev/INSTALL.mdn 
+https://github.com/jemalloc/jemalloc/blob/dev/INSTALL.md 
 2. Using TCmalloc
 `export LD_PRELOAD=<your install jemalloc path>/lib/libjemalloc.so`
 3. Fine tune:
