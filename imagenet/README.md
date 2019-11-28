@@ -141,8 +141,8 @@ make clean
 3. Fine tune
 https://gperftools.github.io/gperftools/tcmalloc.html
 
-### How to using TCmalloc
-1. Install TCmalloc:
+### How to using Jemalloc
+1. Install Jemalloc:
 https://github.com/jemalloc/jemalloc/blob/dev/INSTALL.mdn 
 2. Using TCmalloc
 `export LD_PRELOAD=<your install jemalloc path>/lib/libjemalloc.so`
