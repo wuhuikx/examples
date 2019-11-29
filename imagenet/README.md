@@ -51,6 +51,10 @@ python main.py -a resnet50 --dist-url 'tcp://IP_OF_NODE0:FREEPORT' --dist-backen
 ```bash
 python main.py -a resnet18  --dist-url 'tcp://192.168.20.11:22384' --dist-backend 'gloo' --ppn 2 --world-size 1 --rank 0 -b 128 --mkldnn --multiprocessing-distributed /lustre/dataset/imagenet/img/
 ```
+### One node(with two sockets) 2 instance(please change the num_threads in the running script):
+```bash
+./run_socket.sh
+```
 ### Two nodes 2 instance on each:
 
 Node 1:
@@ -120,7 +124,7 @@ optional arguments:
 ```
 ## Tips
 
-If we want to get a better performance when using MKLDNN backend, we can use a better alloctor: TCmalloc.
+If we want to get a better performance when using MKLDNN backend, we can use a better alloctor: TCmalloc or Jemalloc.
 ### How to using TCmalloc
 1. Install TCmalloc:
 ```
@@ -134,4 +138,13 @@ make clean
 ```
 2. Using TCmalloc
 `export LD_PRELOAD=<your install tcmalloc path>/lib/libtcmalloc.so`
+3. Fine tune
+https://gperftools.github.io/gperftools/tcmalloc.html
 
+### How to using Jemalloc
+1. Install Jemalloc:
+https://github.com/jemalloc/jemalloc/blob/dev/INSTALL.md 
+2. Using Jemalloc
+`export LD_PRELOAD=<your install jemalloc path>/lib/libjemalloc.so`
+3. Fine tune:
+https://github.com/jemalloc/jemalloc/blob/dev/TUNING.md
