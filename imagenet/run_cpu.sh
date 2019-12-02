@@ -15,6 +15,6 @@ echo -e "### using OMP_NUM_THREADS=$TOTAL_CORES"
 echo -e "### using $KMP_SETTING"
 echo -e "### using KMP_BLOCKTIME=$KMP_BLOCKTIME\n"
 
-python -u main.py -a resnet50 --mkldnn /lustre/dataset/imagenet/img_raw -b 128
+python -u main.py -e -a resnet50 --mkldnn /lustre/dataset/imagenet/img_raw -b 128
 
 #python -u main.py -a resnext101_32x8d --mkldnn /lustre/dataset/imagenet/img_raw -b 32
