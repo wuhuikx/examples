@@ -17,6 +17,8 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+from torch.utils import mkldnn as mkldnn_utils
+import models as m
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -60,6 +62,8 @@ parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
+parser.add_argument('--ppn', default=1, type=int,
+                    help='number of processes on each node of distributed training')
 parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
@@ -73,33 +77,63 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--mkldnn', action='store_true', default=False,
+                    help='use mkldnn weight cache')
+parser.add_argument('--no-cuda', action='store_true', default=False,
+                    help='disable CUDA')
+parser.add_argument('-i', '--iterations', default=0, type=int, metavar='N',
+                    help='number of total iterations to run')
+parser.add_argument('--iter-calib', default=0, type=int, metavar='N',
+                    help='number of iterations when calibration to run')
+parser.add_argument('-qe', '--qengine', type=str, default="all",
+                    help='Choose qengine to run. \"all\", \"fbgemm\" or \"mkldnn\".'
+                    '(DEFAULT: %(default)s)')
+parser.add_argument('-w', '--warmup-iterations', default=0, type=int, metavar='N',
+                    help='number of warmup iterations to run')
+parser.add_argument('--INT8', type=str, default="no_INT8",
+                    help='Choose run mode. \"no_INT8\", \"calibration_olny\", \"INT8_only\", \"INT8_and_fp32\".'
+                    '(DEFAULT: %(default)s)')
+parser.add_argument("-t", "--profile", action='store_true',
+                    help="Trigger profile on current topology.")
+parser.add_argument("-qs", "--qscheme", type=str, default="perTensor",
+                    help="The scheme of quantizer:\"perTensor\", \"perChannel\"")
+parser.add_argument("-r", "--reduce_range", action='store_true',
+                    help="Choose reduce range flag. True or False.")
 
 best_acc1 = 0
 
 
 def main():
     args = parser.parse_args()
+    print(args)
+    # print("args.world_size", args.world_size)
+    args.cuda = not args.no_cuda and torch.cuda.is_available()
 
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
-        cudnn.deterministic = True
+        if args.cuda:
+            cudnn.deterministic = True
         warnings.warn('You have chosen to seed training. '
                       'This will turn on the CUDNN deterministic setting, '
                       'which can slow down your training considerably! '
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
-    if args.gpu is not None:
+    if args.gpu is not None and args.cuda:
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
 
     if args.dist_url == "env://" and args.world_size == -1:
         args.world_size = int(os.environ["WORLD_SIZE"])
 
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
+    args.distributed = args.world_size > 1 or args.ppn > 1 or args.multiprocessing_distributed
 
-    ngpus_per_node = torch.cuda.device_count()
+    if args.gpu is not None and args.cuda:
+        ngpus_per_node = torch.cuda.device_count()
+    else:
+        ngpus_per_node = args.ppn
+
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
@@ -115,86 +149,6 @@ def main():
 def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
-
-    if args.gpu is not None:
-        print("Use GPU: {} for training".format(args.gpu))
-
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
-    # create model
-    if args.pretrained:
-        print("=> using pre-trained model '{}'".format(args.arch))
-        model = models.__dict__[args.arch](pretrained=True)
-    else:
-        print("=> creating model '{}'".format(args.arch))
-        model = models.__dict__[args.arch]()
-
-    if args.distributed:
-        # For multiprocessing distributed, DistributedDataParallel constructor
-        # should always set the single device scope, otherwise,
-        # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
-            torch.cuda.set_device(args.gpu)
-            model.cuda(args.gpu)
-            # When using a single GPU per process and per
-            # DistributedDataParallel, we need to divide the batch size
-            # ourselves based on the total number of GPUs we have
-            args.batch_size = int(args.batch_size / ngpus_per_node)
-            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        else:
-            model.cuda()
-            # DistributedDataParallel will divide and allocate batch_size to all
-            # available GPUs if device_ids are not set
-            model = torch.nn.parallel.DistributedDataParallel(model)
-    elif args.gpu is not None:
-        torch.cuda.set_device(args.gpu)
-        model = model.cuda(args.gpu)
-    else:
-        # DataParallel will divide and allocate batch_size to all available GPUs
-        if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
-            model.features = torch.nn.DataParallel(model.features)
-            model.cuda()
-        else:
-            model = torch.nn.DataParallel(model).cuda()
-
-    # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
-
-    # optionally resume from a checkpoint
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            if args.gpu is None:
-                checkpoint = torch.load(args.resume)
-            else:
-                # Map model to be loaded to specified single gpu.
-                loc = 'cuda:{}'.format(args.gpu)
-                checkpoint = torch.load(args.resume, map_location=loc)
-            args.start_epoch = checkpoint['epoch']
-            best_acc1 = checkpoint['best_acc1']
-            if args.gpu is not None:
-                # best_acc1 may be from a checkpoint from a different GPU
-                best_acc1 = best_acc1.to(args.gpu)
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
-
-    cudnn.benchmark = True
 
     # Data loading code
     traindir = os.path.join(args.data, 'train')
@@ -230,9 +184,202 @@ def main_worker(gpu, ngpus_per_node, args):
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
+    # define loss function (criterion) and optimizer
+    if args.cuda:
+        criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    else:
+        criterion = nn.CrossEntropyLoss()
+
+    model_info = m.GetModelInfo(args.arch)
+    float_model_file = os.path.join(model_info['model_dir'], model_info['float_Model'])
+
+    if (args.INT8 != "no_INT8"):
+        quantized_model_state_dict_file = os.path.join(model_info['model_dir'], args.qscheme + "_reduceRange_" + str(args.reduce_range) + "_" + model_info['quantized_Model_State_Dict'])
+        quantized_model_file = os.path.join(model_info['model_dir'], args.qscheme + "_" + model_info['quantized_Model'])
+        scripted_quantized_model_file = os.path.join(model_info['model_dir'], args.qscheme + "_reduceRange_" + str(args.reduce_range) + "_" + model_info['scripted_Quantized_Model'])
+        layers_tmp = ((model_info["layers"]).split('/')[-1]).split(' ')
+        layers = list(map(int, layers_tmp))
+        groups = int(model_info['groups'])
+        width_per_group = int(model_info['width_per_group'])
+
+        loaded_model = torch.quantization.QuantWrapper(models.resnet.ResNet(QuantizableBottleneck, layers, groups=groups, width_per_group=width_per_group))
+        if not os.path.exists(quantized_model_state_dict_file):
+            state_dict = torch.load(float_model_file)
+            loaded_model.module.load_state_dict(state_dict)
+        loaded_model.to('cpu')
+        loaded_model.eval()
+        if args.qscheme == "perTensor":
+            qconfig = torch.quantization.QConfig(activation=torch.quantization.observer.MinMaxObserver.with_args(reduce_range=args.reduce_range),
+                              weight=torch.quantization.default_weight_observer)
+            loaded_model.qconfig = qconfig
+        elif args.qscheme == "perChannel":
+            qconfig = torch.quantization.QConfig(activation=torch.quantization.observer.MinMaxObserver.with_args(reduce_range=args.reduce_range),
+                              weight=torch.quantization.default_per_channel_weight_observer)
+            loaded_model.qconfig = qconfig
+        else:
+            assert False
+        fuse_resnext_modules(loaded_model.module)
+        print('Transforming model, qscheme:{}'.format(args.qscheme))
+        torch.quantization.prepare(loaded_model, inplace=True)
+
+        if not os.path.exists(quantized_model_state_dict_file):
+            # with open(args.model + "_" + args.qscheme + "_prepare_model.txt", "w") as f:
+            #    print(loaded_model, file=f)
+            # Calibrate
+            val_loader_calib = torch.utils.data.DataLoader(
+                datasets.ImageFolder(valdir, transforms.Compose([
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
+                    transforms.ToTensor(),
+                    normalize,
+                ])),
+                batch_size=1, shuffle=False,
+                num_workers=args.workers, pin_memory=True)
+            print("calibration model first..., iteration:{}".format(args.iter_calib))
+            validate(val_loader_calib, loaded_model, criterion, args, is_INT8=True, is_calibration=True)
+            print('Calibration... done')
+            print("convert model......")
+            torch.quantization.convert(loaded_model, inplace=True)
+            print('Conversion... done')
+
+            # Now, let us serialize the model and also script and serialize it. 
+            # Serialize using state dict
+            print('save state_dict to {}'.format(quantized_model_state_dict_file))
+            torch.save(loaded_model.state_dict(),quantized_model_state_dict_file)
+
+            # Serialize without state dict
+            # torch.save(myModel,saved_model_dir+args.model+quantized_model_file)
+            # test_model = torch.load(quantized_model_file)
+
+            # Script and serialize Does not work with mode@opt
+            scriptedModel = torch.jit.script(loaded_model)
+            print('save scriptedModel to {}'.format(scripted_quantized_model_file))
+            torch.jit.save(scriptedModel,scripted_quantized_model_file)
+
+            print("saved_model_dir:{}".format(model_info['model_dir']))
+            print('Serialization done')
+            if args.INT8 == 'calibration_olny':
+                return
+        else:
+            print("convert model......")
+            torch.quantization.convert(loaded_model, inplace=True)
+
+        state_dict_quantized = torch.load(quantized_model_state_dict_file)
+
+        if args.qengine == 'fbgemm' or args.qengine == 'all':
+            torch.backends.quantized.engine = 'fbgemm'
+            print('Loaded quantized model:state_dict')
+            loaded_model.load_state_dict(state_dict_quantized)
+            print('Testing on fbgemm')
+            top1 = validate(val_loader, loaded_model, criterion, args, is_INT8=True)
+        if args.qengine == 'mkldnn' or args.qengine == 'all':
+            torch.backends.quantized.engine = 'mkldnn'
+            print('Loaded quantized model:state_dict')
+            loaded_model.load_state_dict(state_dict_quantized)
+            print('Testing on mkldnn')
+            top1 = validate(val_loader, loaded_model, criterion, args, is_INT8=True)
+        if args.INT8 == 'INT8_only':
+            return
+
+    if args.gpu is not None and args.cuda:
+        print("Use GPU: {} for training".format(args.gpu))
+
+    print("Use Instance: {} for training".format(gpu))
+    print("Use num threads: {} for training".format(torch.get_num_threads()))
+    if args.distributed:
+        if args.dist_url == "env://" and args.rank == -1:
+            print(os.environ["RANK"])
+            args.rank = int(os.environ["RANK"])
+        if args.multiprocessing_distributed:
+            # For multiprocessing distributed training, rank needs to be the
+            # global rank among all the processes
+            args.rank = args.rank * ngpus_per_node + gpu
+        print("args.dist_backend {}".format(args.dist_backend))
+        print("args.dist_url {}".format(args.dist_url))
+        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                                world_size=args.world_size, rank=args.rank)
+    # create model
+    if args.pretrained:
+        print("=> using pre-trained model '{}'".format(args.arch))
+        model = models.__dict__[args.arch](pretrained=True)
+    else:
+        print("=> creating model '{}'".format(args.arch))
+        model = models.__dict__[args.arch]()
+
+    if args.distributed:
+        # For multiprocessing distributed, DistributedDataParallel constructor
+        # should always set the single device scope, otherwise,
+        # DistributedDataParallel will use all available devices.
+        if args.gpu is not None and args.cuda:
+            torch.cuda.set_device(args.gpu)
+            model.cuda(args.gpu)
+            # When using a single GPU per process and per
+            # DistributedDataParallel, we need to divide the batch size
+            # ourselves based on the total number of GPUs we have
+            args.batch_size = int(args.batch_size / ngpus_per_node)
+            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        else:
+            if args.cuda:
+                model.cuda()
+                print("create DistributedDataParallel in GPU")
+            else:
+                print("create DistributedDataParallel in CPU")
+            # DistributedDataParallel will divide and allocate batch_size to all
+            # available GPUs if device_ids are not set
+
+            model = torch.nn.parallel.DistributedDataParallel(model)
+    elif args.gpu is not None and args.cuda:
+        torch.cuda.set_device(args.gpu)
+        model = model.cuda(args.gpu)
+    else:
+        # DataParallel will divide and allocate batch_size to all available GPUs
+        if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
+            model.features = torch.nn.DataParallel(model.features)
+            if args.cuda:
+                model.cuda()
+        else:
+            model = torch.nn.DataParallel(model)
+            if args.cuda:
+                model.cuda()
+
+    optimizer = torch.optim.SGD(model.parameters(), args.lr,
+                                momentum=args.momentum,
+                                weight_decay=args.weight_decay)
+
+    # optionally resume from a checkpoint
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print("=> loading checkpoint '{}'".format(args.resume))
+            if args.gpu is None:
+                checkpoint = torch.load(args.resume)
+            else:
+                # Map model to be loaded to specified single gpu.
+                loc = 'cuda:{}'.format(args.gpu)
+                checkpoint = torch.load(args.resume, map_location=loc)
+            args.start_epoch = checkpoint['epoch']
+            best_acc1 = checkpoint['best_acc1']
+            if args.gpu is not None and args.cuda:
+                # best_acc1 may be from a checkpoint from a different GPU
+                best_acc1 = best_acc1.to(args.gpu)
+            model.load_state_dict(checkpoint['state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            print("=> loaded checkpoint '{}' (epoch {})"
+                  .format(args.resume, checkpoint['epoch']))
+        else:
+            print("=> no checkpoint found at '{}'".format(args.resume))
+
+    if args.cuda:
+        cudnn.benchmark = True
+
     if args.evaluate:
+        if args.mkldnn and not args.cuda:
+            print("using mkldnn model to do inference\n")
         validate(val_loader, model, criterion, args)
         return
+
+    if args.mkldnn and not args.cuda:
+        print("using mkldnn modle to training\n")
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -240,6 +387,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
+        print("run epoch '{}'".format(epoch))
         train(train_loader, model, criterion, optimizer, epoch, args)
 
         # evaluate on validation set
@@ -249,8 +397,7 @@ def main_worker(gpu, ngpus_per_node, args):
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
+        if args.rank == 0:
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
@@ -279,16 +426,29 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        if args.gpu is not None:
+        if args.gpu is not None and args.cuda:
             images = images.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
+
+        if args.cuda:
+            target = target.cuda(args.gpu, non_blocking=True)
+
+        if args.mkldnn and not args.cuda:
+            images = images.to_mkldnn()
 
         # compute output
         output = model(images)
+
+        if args.mkldnn and not args.cuda:
+            output = output.to_dense()
+
         loss = criterion(output, target)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
+
+        if args.mkldnn and not args.cuda:
+            images = images.to_dense()
+
         losses.update(loss.item(), images.size(0))
         top1.update(acc1[0], images.size(0))
         top5.update(acc5[0], images.size(0))
@@ -304,9 +464,16 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i)
+        #if i==20:
+        #    return
 
-
-def validate(val_loader, model, criterion, args):
+def validate(val_loader, model, criterion, args, is_INT8=False, is_calibration=False):
+    if is_calibration:
+        iterations = args.iter_calib
+        warmup = 0
+    else:
+        iterations = args.iterations
+        warmup = args.warmup_iterations
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
@@ -318,32 +485,61 @@ def validate(val_loader, model, criterion, args):
 
     # switch to evaluate mode
     model.eval()
+    if args.evaluate and args.mkldnn and not args.cuda and not is_INT8:
+        model = mkldnn_utils.to_mkldnn(model)
+        # TODO using mkldnn weight cache
 
     with torch.no_grad():
-        end = time.time()
         for i, (images, target) in enumerate(val_loader):
-            if args.gpu is not None:
-                images = images.cuda(args.gpu, non_blocking=True)
-            target = target.cuda(args.gpu, non_blocking=True)
+            if iterations == 0 or i < iterations + warmup:
+                if i >= warmup:
+                    end = time.time()
+                if not is_INT8:
+                    if args.gpu is not None and args.cuda:
+                        images = images.cuda(args.gpu, non_blocking=True)
+                    if args.cuda:
+                        target = target.cuda(args.gpu, non_blocking=True)
 
-            # compute output
-            output = model(images)
-            loss = criterion(output, target)
+                    if args.mkldnn and not args.cuda:
+                        images = images.to_mkldnn()
 
-            # measure accuracy and record loss
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            losses.update(loss.item(), images.size(0))
-            top1.update(acc1[0], images.size(0))
-            top5.update(acc5[0], images.size(0))
+                # compute output
+                output = model(images)
 
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
+                # measure elapsed time
+                if i >= warmup:
+                    batch_time.update(time.time() - end)
 
-            if i % args.print_freq == 0:
-                progress.display(i)
+                if args.mkldnn and not args.cuda and not is_INT8:
+                    output = output.to_dense()
+
+                loss = criterion(output, target)
+
+                # measure accuracy and record loss
+                acc1, acc5 = accuracy(output, target, topk=(1, 5))
+
+                losses.update(loss.item(), images.size(0))
+                top1.update(acc1[0], images.size(0))
+                top5.update(acc5[0], images.size(0))
+
+                if i % args.print_freq == 0:
+                    progress.display(i)
+            elif i == iterations + warmup:
+                break
+
+        if args.profile:
+            # print("export profiling file to {}".format(torch.backends.quantized.engine + "_result.json"))
+            with torch.autograd.profiler.profile() as prof:
+                output = model(images)
+            # prof.export_chrome_trace(torch.backends.quantized.engine + "_result.json")
+            print(prof.key_averages().table(sort_by="cpu_time_total")) 
 
         # TODO: this should also be done with the ProgressMeter
+        batch_size = val_loader.batch_size
+        latency = batch_time.sum / (i - warmup) / batch_size * 1000
+        perf = (i - warmup) * batch_size/batch_time.sum
+        print('latency %3.0f ms'%latency)
+        print('performance %3.0f fps'%perf)
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
 
@@ -419,6 +615,67 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+
+# We have modified the module below with the following changes
+#     1. Unique names for all ReLU modules
+#     2. Replace out+=identity with a module created using nn.quantized.Floatfunctional(). This is needed 
+#     to collect statistics on the activations at the output of the addition with the skip connection.
+class QuantizableBottleneck(torch.nn.Module):
+    __constants__ = ['downsample']
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
+                 base_width=64, dilation=1, norm_layer=None):
+        super(QuantizableBottleneck, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.)) * groups
+        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = models.resnet.conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = models.resnet.conv3x3(width, width, stride, groups, dilation)
+        self.bn2 = norm_layer(width)
+        self.conv3 = models.resnet.conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+
+        self.relu1 = nn.ReLU()
+        self.relu2 = nn.ReLU()
+        self.relu3 = nn.ReLU()
+        self.downsample = downsample
+        self.stride = stride
+        self.skip_add = nn.quantized.FloatFunctional()
+
+    def forward(self, x):
+        identity = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu1(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu2(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out = self.skip_add.add(out, identity)
+        out = self.relu3(out)
+
+        return out
+
+
+# Quantization requires batch norms to be folded into convolutions as scalar multiplies are not yet supported. 
+# In addition, fusion provides for faster execution and is recommended.
+def fuse_resnext_modules(model):
+    torch.quantization.fuse_modules(model, [['conv1', 'bn1', 'relu']], inplace=True)
+    for mod in model.modules():
+        if type(mod) == QuantizableBottleneck:
+            torch.quantization.fuse_modules(mod, [['conv1', 'bn1', 'relu1']], inplace=True)
+            torch.quantization.fuse_modules(mod, [['conv2', 'bn2', 'relu2']], inplace=True)
+            torch.quantization.fuse_modules(mod, [['conv3', 'bn3']], inplace=True)
+            if mod.downsample:
+                torch.quantization.fuse_modules(mod.downsample, [['0', '1']], inplace=True)
 
 
 if __name__ == '__main__':
