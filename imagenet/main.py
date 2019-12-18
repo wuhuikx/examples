@@ -150,6 +150,18 @@ def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
 
+    if args.distributed:
+        if args.dist_url == "env://" and args.rank == -1:
+            print(os.environ["RANK"])
+            args.rank = int(os.environ["RANK"])
+        if args.multiprocessing_distributed:
+            # For multiprocessing distributed training, rank needs to be the
+            # global rank among all the processes
+            args.rank = args.rank * ngpus_per_node + gpu
+        print("args.dist_backend {}".format(args.dist_backend))
+        print("args.dist_url {}".format(args.dist_url))
+        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                                world_size=args.world_size, rank=args.rank)
     # Data loading code
     traindir = os.path.join(args.data, 'train')
     valdir = os.path.join(args.data, 'val')
@@ -242,7 +254,7 @@ def main_worker(gpu, ngpus_per_node, args):
             torch.quantization.convert(loaded_model, inplace=True)
             print('Conversion... done')
 
-            # Now, let us serialize the model and also script and serialize it. 
+            # Now, let us serialize the model and also script and serialize it.
             # Serialize using state dict
             print('save state_dict to {}'.format(quantized_model_state_dict_file))
             torch.save(loaded_model.state_dict(),quantized_model_state_dict_file)
@@ -286,18 +298,6 @@ def main_worker(gpu, ngpus_per_node, args):
 
     print("Use Instance: {} for training".format(gpu))
     print("Use num threads: {} for training".format(torch.get_num_threads()))
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            print(os.environ["RANK"])
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        print("args.dist_backend {}".format(args.dist_backend))
-        print("args.dist_url {}".format(args.dist_url))
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
     # create model
     if args.pretrained:
         print("=> using pre-trained model '{}'".format(args.arch))
@@ -532,7 +532,7 @@ def validate(val_loader, model, criterion, args, is_INT8=False, is_calibration=F
             with torch.autograd.profiler.profile() as prof:
                 output = model(images)
             # prof.export_chrome_trace(torch.backends.quantized.engine + "_result.json")
-            print(prof.key_averages().table(sort_by="cpu_time_total")) 
+            print(prof.key_averages().table(sort_by="cpu_time_total"))
 
         # TODO: this should also be done with the ProgressMeter
         batch_size = val_loader.batch_size
@@ -618,7 +618,7 @@ def accuracy(output, target, topk=(1,)):
 
 # We have modified the module below with the following changes
 #     1. Unique names for all ReLU modules
-#     2. Replace out+=identity with a module created using nn.quantized.Floatfunctional(). This is needed 
+#     2. Replace out+=identity with a module created using nn.quantized.Floatfunctional(). This is needed
 #     to collect statistics on the activations at the output of the addition with the skip connection.
 class QuantizableBottleneck(torch.nn.Module):
     __constants__ = ['downsample']
@@ -665,7 +665,7 @@ class QuantizableBottleneck(torch.nn.Module):
         return out
 
 
-# Quantization requires batch norms to be folded into convolutions as scalar multiplies are not yet supported. 
+# Quantization requires batch norms to be folded into convolutions as scalar multiplies are not yet supported.
 # In addition, fusion provides for faster execution and is recommended.
 def fuse_resnext_modules(model):
     torch.quantization.fuse_modules(model, [['conv1', 'bn1', 'relu']], inplace=True)
