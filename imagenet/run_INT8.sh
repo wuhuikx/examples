@@ -1,7 +1,7 @@
-num_cores=28
-num_threads=28
-model=resnet50
-batch_sizes="16"
+model=$1 #resnext101_32x4d #resnet50
+num_cores=$2  #56
+num_threads=$3 #56
+batch_sizes=$4 #"1"
 use_mkldnn=--mkldnn
 pretrained=--pretrained
 # qengine="all"
@@ -9,11 +9,12 @@ pretrained=--pretrained
 qengine="fbgemm"
 evaluation=-e
 image_path=/lustre/dataset/imagenet/img_raw/
-iterations=10
+iterations=$5 #100
 warmup=50
 iter_calib=2500
-# INT8="INT8_and_fp32"
-INT8="no_INT8"
+#INT8="INT8_and_fp32"
+#INT8="no_INT8"
+INT8="INT8_only"
 qscheme="perChannel"
 #qscheme="perTensor"
 log_level="info"
@@ -35,6 +36,7 @@ if [ $INT8 != 'no_INT8']
         [resnet101]='resnet101-5d3b4d8f.pth'
         [resnet152]='resnet152-b121ed2d.pth'
         [resnext50_32x4d]='resnext50_32x4d-7cdf4587.pth'
+        [resnext101_32x4d]='checkpoint.pth.tar'
         [resnext101_32x8d]='resnext101_32x8d-8ba56ff5.pth'
         [wide_resnet50_2]='wide_resnet50_2-95faca4d.pth'
         [wide_resnet101_2]='wide_resnet101_2-32ee1156.pth'
@@ -51,15 +53,21 @@ if [ $INT8 != 'no_INT8']
         wget -O $model_path $model_download_path
     fi
 fi
+echo "
+export OMP_NUM_THREADS=$num_threads  KMP_AFFINITY=proclist=[$startid-$endid],granularity=fine,explicit
+python -u main.py $pretrained $evaluation $reduce_range $profiling $use_mkldnn -j $workers -a $model -b $batch_sizes --INT8 $INT8 -qs $qscheme --iter-calib $iter_calib -w $warmup -qe $qengine  -i $iterations $image_path &  " >> command.sh
+
 # for bs in $batch_sizes; do
 for i in $(seq 0 $(($num_cores / $num_threads - 1)))
 do
 echo $i "instance"
 startid=$(($i*$num_threads))
 endid=$(($i*$num_threads+$num_threads-1))
+echo "startid" $startid
+echo "endid" $endid
 export OMP_SCHEDULE=STATIC OMP_NUM_THREADS=$num_threads OMP_DISPLAY_ENV=TRUE OMP_PROC_BIND=TRUE GOMP_CPU_AFFINITY="$startid-$endid"  
 export OMP_NUM_THREADS=$num_threads  KMP_AFFINITY=proclist=[$startid-$endid],granularity=fine,explicit
-python -u main.py $pretrained $evaluation $reduce_range $profiling $use_mkldnn -j $workers -a $model -b $batch_sizes --INT8 $INT8 -qs $qscheme --iter-calib $iter_calib -w $warmup -qe $qengine  -i $iterations $image_path &
+python -u main.py $pretrained $evaluation $reduce_range $profiling $use_mkldnn -j $workers -a $model -b $batch_sizes --INT8 $INT8 -qs $qscheme --iter-calib $iter_calib -w $warmup -qe $qengine  -i $iterations $image_path &  
 done
 # wait
 # done

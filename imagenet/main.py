@@ -28,7 +28,7 @@ parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
-                    choices=model_names,
+                    #choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet18)')
@@ -210,7 +210,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     model_info = m.GetModelInfo(args.arch)
     float_model_file = os.path.join(model_info['model_dir'], model_info['float_Model'])
-
+    
     if (args.INT8 != "no_INT8"):
         quantized_model_state_dict_file = os.path.join(model_info['model_dir'], args.qscheme + "_reduceRange_" + str(args.reduce_range) + "_" + model_info['quantized_Model_State_Dict'])
         quantized_model_file = os.path.join(model_info['model_dir'], args.qscheme + "_" + model_info['quantized_Model'])
@@ -223,7 +223,10 @@ def main_worker(gpu, ngpus_per_node, args):
         loaded_model = torch.quantization.QuantWrapper(models.resnet.ResNet(QuantizableBottleneck, layers, groups=groups, width_per_group=width_per_group))
         if not os.path.exists(quantized_model_state_dict_file):
             state_dict = torch.load(float_model_file)
-            loaded_model.module.load_state_dict(state_dict)
+            if (model_info['model_name'] == 'resnext101_32x4d'):
+                loaded_model.load_state_dict(state_dict['state_dict'])
+            else:
+                loaded_model.module.load_state_dict(state_dict)
         loaded_model.to('cpu')
         loaded_model.eval()
         if args.qscheme == "perTensor":
@@ -281,7 +284,7 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             print("convert model......")
             torch.quantization.convert(loaded_model, inplace=True)
-
+        
         state_dict_quantized = torch.load(quantized_model_state_dict_file)
 
         if args.qengine == 'fbgemm' or args.qengine == 'all':
