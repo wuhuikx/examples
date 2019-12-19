@@ -184,13 +184,9 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         train_sampler = None
 
-    if args.workers != 0:
-        blocking = True
-    else:
-        blocking = False
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, blocking=blocking)
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
@@ -200,7 +196,7 @@ def main_worker(gpu, ngpus_per_node, args):
             normalize,
         ])),
         batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True, blocking=blocking)
+        num_workers=args.workers, pin_memory=True)
 
     # define loss function (criterion) and optimizer
     if args.cuda:
@@ -252,7 +248,7 @@ def main_worker(gpu, ngpus_per_node, args):
                     normalize,
                 ])),
                 batch_size=1, shuffle=False,
-                num_workers=args.workers, pin_memory=True, blocking=blocking)
+                num_workers=args.workers, pin_memory=True)
             print("calibration model first..., iteration:{}".format(args.iter_calib))
             validate(val_loader_calib, loaded_model, criterion, args, is_INT8=True, is_calibration=True)
             print('Calibration... done')
