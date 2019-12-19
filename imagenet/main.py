@@ -79,6 +79,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'multi node data parallel training')
 parser.add_argument('--mkldnn', action='store_true', default=False,
                     help='use mkldnn weight cache')
+parser.add_argument('--bf16', action='store_true', default=False,
+                    help='enable bf16 operator')
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='disable CUDA')
 parser.add_argument('-i', '--iterations', default=0, type=int, metavar='N',
@@ -437,7 +439,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             target = target.cuda(args.gpu, non_blocking=True)
 
         if args.mkldnn and not args.cuda:
-            images = images.to_mkldnn()
+            if args.bf16:
+                images = images.to_mkldnn().bfloat16()
+            else:
+                images = images.to_mkldnn()
 
         # compute output
         output = model(images)
@@ -505,7 +510,10 @@ def validate(val_loader, model, criterion, args, is_INT8=False, is_calibration=F
                         target = target.cuda(args.gpu, non_blocking=True)
 
                     if args.mkldnn and not args.cuda:
-                        images = images.to_mkldnn()
+                        if args.bf16:
+                            images = images.to_mkldnn().bfloat16()
+                        else:
+                            images = images.to_mkldnn()
 
                 # compute output
                 output = model(images)
