@@ -206,6 +206,28 @@ def main_worker(gpu, ngpus_per_node, args):
 
     model_info = m.GetModelInfo(args.arch)
     float_model_file = os.path.join(model_info['model_dir'], model_info['float_Model'])
+   
+    if (args.INT8 == "FP32_only"):
+        layers_tmp = ((model_info["layers"]).split('/')[-1]).split(' ')
+        layers = list(map(int, layers_tmp))
+        groups = int(model_info['groups'])
+        width_per_group = int(model_info['width_per_group'])
+        loaded_model = models.resnet.ResNet(models.resnet.Bottleneck, layers, groups=groups, width_per_group=width_per_group)
+        state_dict = torch.load(float_model_file)
+        if (model_info['model_name'] == 'resnext101_32x4d'):
+            state_dict = state_dict['state_dict']
+            import collections
+            state_dict_new = collections.OrderedDict()
+            for key in state_dict.keys():
+                key_new = key.split("module.")[1]
+                state_dict_new[key_new] = state_dict[key]
+            loaded_model.load_state_dict(state_dict_new)
+        else:
+            loaded_model.load_state_dict(state_dict)
+        loaded_model.to('cpu')
+        loaded_model.eval()
+        top1 = validate(val_loader, loaded_model, criterion, args, is_INT8=False)
+        return 
     
     if (args.INT8 != "no_INT8"):
         quantized_model_state_dict_file = os.path.join(model_info['model_dir'], args.qscheme + "_reduceRange_" + str(args.reduce_range) + "_" + model_info['quantized_Model_State_Dict'])
@@ -292,6 +314,10 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.qengine == 'mkldnn' or args.qengine == 'all':
             torch.backends.quantized.engine = 'mkldnn'
             print('Loaded quantized model:state_dict')
+            if (model_info['model_name'] == 'resnext101_32x4d' or \
+                model_info['model_name'] == 'resnet50'):
+                state_dict_quantized['module.fc.scale'] = 1
+                state_dict_quantized['module.fc.zero_point'] = 0
             loaded_model.load_state_dict(state_dict_quantized)
             print('Testing on mkldnn')
             top1 = validate(val_loader, loaded_model, criterion, args, is_INT8=True)

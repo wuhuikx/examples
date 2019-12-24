@@ -5,11 +5,14 @@ batch_sizes=$4 #"1"
 use_mkldnn=--mkldnn
 pretrained=--pretrained
 # qengine="all"
-# qengine="qmkldnn"
-qengine="fbgemm"
 evaluation=-e
 image_path=/lustre/dataset/imagenet/img_raw/
 iterations=$5 #100
+#qengine="mkldnn"
+qengine="fbgemm"
+if (($# > 5)); then
+    qengine=$6
+fi
 warmup=50
 iter_calib=2500
 #INT8="INT8_and_fp32"
@@ -57,18 +60,37 @@ echo "
 export OMP_NUM_THREADS=$num_threads  KMP_AFFINITY=proclist=[$startid-$endid],granularity=fine,explicit
 python -u main.py $pretrained $evaluation $reduce_range $profiling $use_mkldnn -j $workers -a $model -b $batch_sizes --INT8 $INT8 -qs $qscheme --iter-calib $iter_calib -w $warmup -qe $qengine  -i $iterations $image_path &  " >> command.sh
 
+mkdir logs
 # for bs in $batch_sizes; do
 for i in $(seq 0 $(($num_cores / $num_threads - 1)))
 do
 echo $i "instance"
 startid=$(($i*$num_threads))
 endid=$(($i*$num_threads+$num_threads-1))
-echo "startid" $startid
-echo "endid" $endid
 export OMP_SCHEDULE=STATIC OMP_NUM_THREADS=$num_threads OMP_DISPLAY_ENV=TRUE OMP_PROC_BIND=TRUE GOMP_CPU_AFFINITY="$startid-$endid"  
 export OMP_NUM_THREADS=$num_threads  KMP_AFFINITY=proclist=[$startid-$endid],granularity=fine,explicit
-python -u main.py $pretrained $evaluation $reduce_range $profiling $use_mkldnn -j $workers -a $model -b $batch_sizes --INT8 $INT8 -qs $qscheme --iter-calib $iter_calib -w $warmup -qe $qengine  -i $iterations $image_path &  
+python -u main.py $pretrained $evaluation $reduce_range $profiling $use_mkldnn -j $workers -a $model -b $batch_sizes --INT8 $INT8 -qs $qscheme --iter-calib $iter_calib -w $warmup -qe $qengine  -i $iterations $image_path 2>&1 | tee logs/instance_$i &  
+
 done
-# wait
-# done
+wait
+
+# report results
+instances=$(($num_cores / $num_threads))
+fps=$(grep 'performance' logs/instance_* | \
+	awk '{ fps_sum += $2 } END { print fps_sum }')
+latency=$(grep 'latency' logs/instance_* | \
+	awk -v instances=$instances \
+	'{ latency_sum += $2 } END { print latency_sum / instances }')
+
+echo ---------*----------*---------
+echo Performance result report
+echo ---------*----------*---------
+echo Engine: "$qengine"
+echo Threads: $num_threads
+echo Instances: $instances
+echo Threads per instance: $num_cores
+echo Iterations: $iterations
+echo Batch size: $batch_sizes
+echo Average latency for one image: ${latency}ms
+echo FPS: $fps images/sec
 
