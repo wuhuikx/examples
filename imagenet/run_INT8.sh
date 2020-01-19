@@ -18,6 +18,7 @@ iter_calib=2500
 #INT8="INT8_and_fp32"
 #INT8="no_INT8"
 INT8="INT8_only"
+#INT8="FP32_only"
 qscheme="perChannel"
 #qscheme="perTensor"
 log_level="info"
@@ -25,6 +26,7 @@ log_level="info"
 profiling=""
 reduce_range=""
 workers=0
+model_url=https://download.pytorch.org/models/
 # export GLOG_logtostderr=1; export GLOG_v=1000
 # export MKLDNN_VERBOSE=1
 
@@ -60,6 +62,7 @@ echo "
 export OMP_NUM_THREADS=$num_threads  KMP_AFFINITY=proclist=[$startid-$endid],granularity=fine,explicit
 python -u main.py $pretrained $evaluation $reduce_range $profiling $use_mkldnn -j $workers -a $model -b $batch_sizes --INT8 $INT8 -qs $qscheme --iter-calib $iter_calib -w $warmup -qe $qengine  -i $iterations $image_path &  " >> command.sh
 
+rm -rf logs
 mkdir logs
 # for bs in $batch_sizes; do
 for i in $(seq 0 $(($num_cores / $num_threads - 1)))
